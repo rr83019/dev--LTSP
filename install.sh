@@ -1,47 +1,88 @@
-#!/bin/bash
+#!/bin/bash -x
 
-#Updating packages
+# Source setting.sh
+source /vagrant/settings.sh
 
-apt-get --yes update
-apt-get --yes upgrade
+# Fetching LAN_IP and network address
+if [[ ${STANDALONE,,} != yes ]]; then
+   LAN_IP=$(ip addr show enp0s8 | grep -Po 'inet \K[\d.]+')
+fi
+NETWORK="$(echo $LAN_IP | cut -d'.' -f1-3)"
 
-#Installing dependencies
+# Adding repository and Updating packages
+add-apt-repository ppa:ts.sch.gr --yes
+apt update --yes
+apt upgrade --yes
 
-apt-get --yes --install-recommends install dnsmasq ldm-ubuntu-theme
-apt-get --yes --install-recommends install ltsp-server
-export DEBIAN_FRONTEND=noninteractive
-apt-get -yq --yes --install-recommends install ltsp-client
-apt-get --yes install epoptes epoptes-client
+# Installing packages
+apt install --yes --install-recommends ltsp-server epoptes
+# Setting type of user interface with a boot parameter - https://www.debian.org/releases/jessie/i386/ch05s03.html
+DEBIAN_FRONTEND=noninteractive apt install --yes --install-recommends ltsp-client
+apt install --yes python-twisted ltsp-manager 
 
+# Adding vagrant user to group epoptes
+gpasswd -a ${SUDO_USER:-$(logname)} epoptes
 
-#Adding vagrant user to group epoptes
-
-gpasswd -a ${SUDO_USER:-$USER} epoptes
-
-#Updating kernel
-
+# Updating kernel
 echo 'IPAPPEND=3' >> /etc/ltsp/update-kernels.conf
 /usr/share/ltsp/update-kernels
 
-#configure dnsmasq
+# Configure dnsmasq
+if [[ ${STANDALONE,,} == "yes" ]]; then
+    ltsp-config dnsmasq --enable-dns
+else
+    ltsp-config dnsmasq
+fi
 
-ltsp-config dnsmasq
+# enabling password authentication 
+sed -i /etc/ssh/sshd_config \
+    -e "/PasswordAuthentication no\$/ c PasswordAuthentication yes"
+service ssh restart
 
-#Creating lts.conf
+# Creating lts.conf
+lts_path=$(ltsp-config -o lts.conf|cut -d' ' -f2)
 
-ltsp-config lts.conf
+# Client reboot issue fix (https://github.com/NetworkBlockDevice/nbd/issues/59)
+echo 'INIT_COMMAND_MV_NBD_CHECKUPDATE="mv /usr/share/ldm/rc.d/I01-nbd-checkupdate /usr/share/ldm/rc.d/I01-nbd-checkupdate.orig"' \
+    >> "$lts_path"
 
-#Installing additional software
+# Installing additional software
+apt install --yes $PACKAGES
 
-apt-get --yes install edubuntu-desktop
-apt-get --yes install ubuntu-edu-preschool ubuntu-edu-primary ubuntu-edu-secondary ubuntu-edu-tertiary
-
-#Installing ltsp-manager
-
-add-apt-repository ppa:ts.sch.gr
-apt-get --yes update
-apt-get --yes install ltsp-manager
-
-#Creating client image
-
+# Creating client image
 ltsp-update-image --cleanup /
+
+# Setting dhcp-range
+sed -i /etc/dnsmasq.d/ltsp-server-dnsmasq.conf \
+    -e "/^dhcp-range=.*,8h\$/ c dhcp-range=${NETWORK}.20,${NETWORK}.250,8h"
+
+# Setting mode of operation of ltsp server
+if [[ ${STANDALONE,,} == "yes" ]]; then
+    echo "LTSP server will be in standalone mode of operation"	
+    echo "LTSP server will provide DHCP services.."	
+    sed -i /etc/dnsmasq.d/ltsp-server-dnsmasq.conf \
+        -e "/.*,proxy\$/ c \ " 
+else
+    echo "LTSP server will be in Non-standalone mode of operation"	
+    echo "There is an existing DHCP server running"
+    echo "LTSP server won't provide DHCP services.."
+    sed -i /etc/dnsmasq.d/ltsp-server-dnsmasq.conf \
+        -e "/192.168.1.0,proxy\$/ c dhcp-range=${NETWORK}.0,proxy"
+fi
+
+# Restarting service
+service dnsmasq restart
+
+# Automatically login from clients 
+if [[ ${AUTOMATIC_LOGIN,,} == "yes" ]]; then
+    sed -i "$lts_path" \
+        -e "/^#LDM_AUTOLOGIN/ a LDM_USERNAME=vagrant \nLDM_PASSWORD=vagrant" \
+        -e "/^#LDM_AUTOLOGIN/ c LDM_AUTOLOGIN=True"
+fi 
+
+# Provide Login as Guest button to directly login from client
+if [[ ${GUEST_ACCOUNT,,} == "yes" ]]; then
+    sed -i "$lts_path" \
+        -e "/^#LDM_GUESTLOGIN/ a LDM_USERNAME=vagrant \nLDM_PASSWORD=vagrant" \
+        -e "/^#LDM_GUESTLOGIN/ c LDM_GUESTLOGIN=True"
+fi
